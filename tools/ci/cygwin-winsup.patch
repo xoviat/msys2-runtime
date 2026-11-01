@@ -1351,6 +1351,31 @@ index ba65aca..786063f 100644
      api_fatal ("can't create tty_list::mutex '%s', %E", name);
    ProtectHandle (mutex);
  }
+diff --git a/winsup/cygwin/uinfo.cc b/winsup/cygwin/uinfo.cc
+index 5c0616a..6e7e11a 100644
+--- a/winsup/cygwin/uinfo.cc
++++ b/winsup/cygwin/uinfo.cc
+@@ -2532,6 +2532,20 @@ pwdgrp::fetch_account_from_windows (fetch_user_arg_t &arg, bool ugid_caching, cy
+ 		  if (nas != NERR_Success)
+ 		    {
+ 		      debug_printf ("NetUserGetInfo(%W) %u", name, nas);
++		      /* SAM is inaccessible, for instance from a restricted
++			 or sandboxed token.  Don't skip the account attributes
++			 for that reason: home, shell and gecos are still
++			 resolvable from the nsswitch schemes which don't need
++			 SAM (env, path, the user profile, ...).  Falling
++			 through to the /home/USER and /usr/bin/bash defaults
++			 here would ignore db_home (including `env`) and break
++			 tools like ssh even when HOME is set. */
++		      home = cygheap->pg.get_home ((PUSER_INFO_3) NULL, sid, dom,
++						   name, fully_qualified_name);
++		      shell = cygheap->pg.get_shell ((PUSER_INFO_3) NULL, sid, dom,
++						     name, fully_qualified_name);
++		      gecos = cygheap->pg.get_gecos ((PUSER_INFO_3) NULL, sid, dom,
++						     name, fully_qualified_name);
+ 		      break;
+ 		    }
+ 		  /* Overwrite name to be sure case is same as in SAM */
 diff --git a/winsup/cygwin/wincap.cc b/winsup/cygwin/wincap.cc
 index f94b9f6..477d212 100644
 --- a/winsup/cygwin/wincap.cc

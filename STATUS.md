@@ -44,6 +44,8 @@ returns real pids and pipelines work end-to-end.
 | Fork/wincap | `wincap.cc`, `local_includes/shared_info.h`, `tty.cc` | `in_this_image` cross-image wincap guard (PSEC loads per-process copies; "fork-friendly" caps must come from the real kernel), shared-info hardening, tty fixes |
 | Fork retry & diagnostics | `fork.cc`, `mm/cygheap.cc`, `sigproc.cc`, `local_includes/child_info.h` | (2026-10-31, fixes the residual fork failures of FORK_FAILURES.md) checked + retried fixed-address cygheap reservation with real diagnostics (window-walk occupant naming); chunked `child_copy` with per-chunk retries and retryable child death; child deaths routed through `proc_retry` with a seeded retry budget for fork, spawn **and** exec children (the `STATUS_DLL_INIT_FAILED` retry machinery was previously unreachable and the budget was 0) |
 
+| Account attributes under restricted tokens | `uinfo.cc` | (2026-11-01, fixes the msys2/sandbox home issue) `fetch_account_from_windows` no longer skips home/shell/gecos when `NetUserGetInfo` fails — restricted/sandboxed tokens have no SAM access, and the skip collapsed home to the `/home/USER` default while ignoring `db_home` (including `env`) entirely.  The nsswitch schemes are now consulted via the ui-less `get_home`/`get_shell`/`get_gecos`, so `$HOME`/`HOMEDRIVE`+`HOMEPATH`/`USERPROFILE` and `db_home` schemes work under the sandbox and ssh finds `~/.ssh` |
+
 **Mandatory companion step (not a source fix):** the mxc PSEC force-relocates
 images that have not opted into ASLR, breaking cygwin's same-address fork.
 Every runtime DLL/exe must have the PE `DYNAMICBASE` flag set —
@@ -52,12 +54,18 @@ does this automatically).  Drop-in use: copy the released `msys-2.0.dll`
 over a Git for Windows install's `{usr/bin,bin}/msys-2.0.dll`, run
 `peflag.py set` on the install, done — verified on a pristine copy
 (bash --version, pipelines, file IO all green in the mxc sandbox).
+  install.ps1 doubles as an **update** script: re-runs keep the original
+  `msys-2.0.dll.stock` backup, replace the installed DLL in place (even
+  while it is mapped into running processes), and merge the PE-flag
+  manifest instead of overwriting it, so uninstall.ps1 still reverts
+  everything after any number of updates.
 
 ## 3. Layout, build, verify
 
 - This repo = the cygwin tree; the fixes live in `winsup/cygwin/`.
 - `tools/ci/cygwin-winsup.patch` — the canonical patch (generated with
-  `git diff -- winsup/`).
+  `git diff 2ff49b026 -- winsup/`: the full mxc delta over the upstream
+  base).
 - `tools/ci/apply-to-msys.sh <msys2-runtime-src>` — transfers it to a clean
   git-for-windows/msys2-runtime checkout (pinned in `tools/ci/MSYS2_RUNTIME_REF`).
   Verified byte-identical round-trip against the gate-tested tree for all 8
@@ -156,7 +164,32 @@ runtime** and **covered by the gate**:
 3. `child_info::parent_winpid` is never set in the fork path (only
    `spawn.cc` sets it); fork children read uninitialized stack there.
 
-## 7. History
+## 7. The msys2/sandbox home issue (git-over-SSH in the sandbox) — resolved 2026-11-01
+
+`git push`/`git fetch` over SSH failed inside the sandbox with
+`Host key verification failed` / `Permission denied (publickey)`: ssh
+resolved `~/.ssh` under `/home/<user>` — a directory that cannot exist —
+instead of the real profile.  Root cause (found via strace of the runtime
+inside the sandbox): `pwdgrp::fetch_account_from_windows` gated the whole
+home/shell/gecos resolution on `NetUserGetInfo` succeeding.  Restricted
+sandbox tokens have no SAM RPC access (`NetUserGetInfo` returns
+`ERROR_ACCESS_DENIED`), the attribute fetch was skipped with a `break`,
+and the synthesized passwd entry fell back to `/home/<user>` — bypassing
+the nsswitch `db_home` schemes (including `env`, i.e. `$HOME`) entirely.
+
+Fix (`uinfo.cc`): on `NetUserGetInfo` failure the account attributes are
+resolved through the ui-less `get_home`/`get_shell`/`get_gecos`
+overloads, which consult the nsswitch schemes that need no SAM (`env`
+reads `$HOME`/`HOMEDRIVE`+`HOMEPATH`/`USERPROFILE`, `path` is pure string
+formatting, `windows` falls back to the profile directory).  Verified in
+the sandbox (workspace-write semantics: global reads, restricted writes)
+with the fixed DLL: `pw_dir` resolves to the profile (`/c/Users/<user>`
+or whatever `$HOME` says — the `env` scheme now wins under the token
+too), `ssh -G` reports the real `userknownhostsfile`, and
+`git ls-remote origin` over SSH succeeds.  The full gate stays green
+(14 passed, 0 failed).
+
+## 8. History
 
 Root cause and fix were established by instrumenting the msys runtime
 (TEMPORARY DIAGNOSTIC code, all stripped before this branch): name-timeline

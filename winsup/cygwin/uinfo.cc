@@ -2524,6 +2524,20 @@ pwdgrp::fetch_account_from_windows (fetch_user_arg_t &arg, bool ugid_caching, cy
 		  if (nas != NERR_Success)
 		    {
 		      debug_printf ("NetUserGetInfo(%W) %u", name, nas);
+		      /* SAM is inaccessible, for instance from a restricted
+			 or sandboxed token.  Don't skip the account attributes
+			 for that reason: home, shell and gecos are still
+			 resolvable from the nsswitch schemes which don't need
+			 SAM (env, path, the user profile, ...).  Falling
+			 through to the /home/USER and /usr/bin/bash defaults
+			 here would ignore db_home (including `env`) and break
+			 tools like ssh even when HOME is set. */
+		      home = cygheap->pg.get_home ((PUSER_INFO_3) NULL, sid, dom,
+						   name, fully_qualified_name);
+		      shell = cygheap->pg.get_shell ((PUSER_INFO_3) NULL, sid, dom,
+						     name, fully_qualified_name);
+		      gecos = cygheap->pg.get_gecos ((PUSER_INFO_3) NULL, sid, dom,
+						     name, fully_qualified_name);
 		      break;
 		    }
 		  /* Overwrite name to be sure case is same as in SAM */
