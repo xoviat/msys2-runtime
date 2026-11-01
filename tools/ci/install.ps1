@@ -2,18 +2,25 @@
 <#
 .SYNOPSIS
   Drop the patched msys-2.0.dll into a Git for Windows ("Git Bash") install.
+  Also works as an in-place update over a previous install.
 
 .DESCRIPTION
   For each copy of the runtime (usr\bin\msys-2.0.dll and bin\msys-2.0.dll)
   the existing DLL is renamed to msys-2.0.dll.stock and the patched one is
-  installed in its place, so uninstall.ps1 can restore the original.
+  installed in its place, so uninstall.ps1 can restore the original.  On a
+  re-run (update) the existing msys-2.0.dll.stock backup is kept as-is and
+  only the installed DLL is replaced -- even when it is still mapped into
+  running processes (the old copy is renamed aside first, which Windows
+  allows for in-use images, and removed afterwards).
 
   It also opts every PE image in the install into ASLR (the DYNAMICBASE
   flag).  Sandboxes built on the Windows Process Security Environment
   (PSEC) force-relocate images that did not opt in, which breaks Cygwin's
   same-address-space fork (children die with 0xC0000142).  Every changed
   flag is recorded in a manifest so uninstall.ps1 can revert it; use
-  -SkipPeFlags to leave the images alone.
+  -SkipPeFlags to leave the images alone.  The manifest is merged across
+  runs: an update never loses the original flags recorded by the first
+  install.
 
   Keep this script next to msys-2.0.dll (as they are laid out in the
   release).  Installing into "C:\Program Files\Git" needs an elevated
@@ -83,13 +90,32 @@ foreach ($rel in @("usr\bin", "bin")) {
     if (!(Test-Path -LiteralPath $dir)) { continue }
     $target = Join-Path $dir "msys-2.0.dll"
     $backup = Join-Path $dir "msys-2.0.dll.stock"
+    $stale  = Join-Path $dir "msys-2.0.dll.update-old"
+    # Clean up after an interrupted update.
+    if (Test-Path -LiteralPath $stale) {
+        try { Remove-Item -LiteralPath $stale -Force } catch { }
+    }
     if (Test-Path -LiteralPath $target) {
         if (!(Test-Path -LiteralPath $backup)) {
+            # First install: keep the original as the .stock backup.
             Move-Item -LiteralPath $target -Destination $backup
             Write-Host "backed up  : $rel\msys-2.0.dll -> msys-2.0.dll.stock"
+        } elseif ((Get-FileHash -LiteralPath $target).Hash -eq
+                  (Get-FileHash -LiteralPath $dll).Hash) {
+            Write-Host "up to date : $rel\msys-2.0.dll (identical DLL already installed)"
+            continue
         } else {
-            Write-Host "backup kept: $rel\msys-2.0.dll.stock (pre-existing)"
-            Remove-Item -LiteralPath $target -Force
+            # Update: keep the original .stock backup, replace only the
+            # installed DLL.  A running DLL cannot be deleted but can be
+            # renamed -- move it aside, install the new copy, then remove
+            # the old one (best effort; leftover removed on the next run).
+            Write-Host "updating   : $rel\msys-2.0.dll (backup kept: msys-2.0.dll.stock)"
+            Move-Item -LiteralPath $target -Destination $stale
+            try {
+                Remove-Item -LiteralPath $stale -Force
+            } catch {
+                Write-Host "note: old $rel\msys-2.0.dll is still in use; delete msys-2.0.dll.update-old later"
+            }
         }
     }
     try {
@@ -120,8 +146,23 @@ if ($SkipPeFlags) {
             OldDllChar = $info.DllChar
         }
     }
-    ($changed | ConvertTo-Json) | Set-Content -LiteralPath $manifestPath -Encoding ASCII
-    Write-Host ("PE flag sweep: {0} image(s) opted into ASLR (manifest: {1})" -f $changed.Count, $manifestPath)
+    # Merge with any manifest from a previous install: an update must not
+    # lose the original flags recorded back then, or uninstall.ps1 could no
+    # longer restore them.
+    $merged = @()
+    if (Test-Path -LiteralPath $manifestPath) {
+        $prev = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+        if ($null -ne $prev) {
+            if ($prev -isnot [System.Array]) { $prev = @($prev) }
+            $merged = @($prev)
+        }
+    }
+    foreach ($e in $changed) {
+        if ($merged.Path -notcontains $e.Path) { $merged += $e }
+    }
+    ConvertTo-Json -InputObject @($merged) |
+        Set-Content -LiteralPath $manifestPath -Encoding ASCII
+    Write-Host ("PE flag sweep: {0} image(s) opted into ASLR (manifest: {1}, {2} entries)" -f $changed.Count, $manifestPath, $merged.Count)
 }
 
 Write-Host "done. Run uninstall.ps1 to revert."
